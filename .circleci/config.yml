@@ -1,31 +1,182 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine.
-# See: https://circleci.com/docs/reference/configuration-reference
 version: 2.1
 
-# Define a job to be invoked later in a workflow.
-# See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#jobs-overview & https://circleci.com/docs/reference/configuration-reference/#jobs
-jobs:
-  say-hello:
-    # Specify the execution environment. You can specify an image from Docker Hub or use one of our convenience images from CircleCI's Developer Hub.
-    # See: https://circleci.com/docs/guides/execution-managed/executor-intro/ & https://circleci.com/docs/reference/configuration-reference/#executor-job
+orbs:
+  codecov: codecov/codecov@3.3.0
+
+executors:
+  java-executor:
     docker:
-      # Specify the version you desire here
-      # See: https://circleci.com/developer/images/image/cimg/base
-      - image: cimg/base:current
+      - image: cimg/openjdk:17.0
+    environment:
+      JVM_OPTS: -Xmx3g
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  python-executor:
+    docker:
+      - image: cimg/python:3.13
+    environment:
+      PYTHONUNBUFFERED: 1
 
-    # Add steps to the job
-    # See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#steps-overview & https://circleci.com/docs/reference/configuration-reference/#steps
+jobs:
+  # Build and test Java code
+  build-and-test-java:
+    executor: java-executor
     steps:
-      # Checkout the code as the first step.
       - checkout
+      - restore_cache:
+          keys:
+            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
+            - gradle-cache-
       - run:
-          name: "Say hello"
-          command: "echo Hello, World!"
+          name: Build project
+          command: ./gradlew clean build -x test --info
+      - save_cache:
+          paths:
+            - ~/.gradle
+          key: gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
+      - store_artifacts:
+          path: build/libs
+          destination: jars
+      - persist_to_workspace:
+          root: .
+          paths:
+            - build
+            - gradle
 
-# Orchestrate jobs using workflows
-# See: https://circleci.com/docs/guides/orchestrate/workflows/ & https://circleci.com/docs/reference/configuration-reference/#workflows
+  # Run Java tests
+  test-java:
+    executor: java-executor
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
+            - gradle-cache-
+      - run:
+          name: Run Java tests
+          command: ./gradlew test --info
+      - run:
+          name: Generate JaCoCo coverage report
+          command: ./gradlew jacocoTestReport
+      - store_test_results:
+          path: build/test-results
+      - store_artifacts:
+          path: build/reports/tests
+          destination: test-reports
+      - store_artifacts:
+          path: build/reports/jacoco
+          destination: coverage-reports
+      - codecov/upload:
+          files: ./build/reports/jacoco/test/jacocoTestReport.xml
+          flags: java
+      - persist_to_workspace:
+          root: .
+          paths:
+            - build/reports/jacoco
+
+  # Run code quality checks
+  code-quality-checks:
+    executor: java-executor
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
+            - gradle-cache-
+      - run:
+          name: Run Spotless checks
+          command: ./gradlew spotlessCheck --info
+      - run:
+          name: Run Checkstyle
+          command: ./gradlew checkstyleMain checkstyleTest --info
+      - store_artifacts:
+          path: build/reports/checkstyle
+          destination: checkstyle-reports
+
+  # Package and prepare for publishing
+  package:
+    executor: java-executor
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
+            - gradle-cache-
+      - run:
+          name: Build fat JAR
+          command: ./gradlew fatJar --info
+      - run:
+          name: Generate Javadoc
+          command: ./gradlew javadoc --info
+      - store_artifacts:
+          path: build/libs
+          destination: packages
+      - store_artifacts:
+          path: build/docs/javadoc
+          destination: javadoc
+      - persist_to_workspace:
+          root: .
+          paths:
+            - build/libs
+            - build/docs/javadoc
+
+  # Publish to Maven Central (only on tags)
+  publish-maven-central:
+    executor: java-executor
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
+            - gradle-cache-
+      - run:
+          name: Setup GPG signing key
+          command: |
+            mkdir -p ~/.gnupg
+            echo "${GPG_KEY}" | base64 -d > ~/.gnupg/private.key
+            gpg --import ~/.gnupg/private.key
+      - run:
+          name: Publish to Maven Central
+          command: |
+            ./gradlew publishAllPublicationsToMavenCentralRepository \
+              -P"org.gradle.project.signing.keyId=${GPG_KEY_ID}" \
+              -P"org.gradle.project.signing.password=${GPG_KEY_PASSWORD}" \
+              -P"org.gradle.project.signing.secretKeyRingFile=${HOME}/.gnupg/private.key" \
+              --info
+      - run:
+          name: Cleanup GPG key
+          command: rm -f ~/.gnupg/private.key
+
+  # Generate and upload coverage report
+  coverage-report:
+    executor: java-executor
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: Download and upload coverage to Codecov
+          command: |
+            if [ -f "build/reports/jacoco/test/jacocoTestReport.xml" ]; then
+              bash <(curl -s https://codecov.io/bash) \
+                -f build/reports/jacoco/test/jacocoTestReport.xml \
+                -t ${CODECOV_TOKEN} \
+                -F java
+            fi
+
 workflows:
-  say-hello-workflow: # This is the name of the workflow, feel free to change it to better match your workflow.
-    # Inside the workflow, you define the jobs you want to run.
+  # Development workflow - runs on all commits
+  ci:
     jobs:
-      - say-hello
+      - build-and-test-java
+      - test-java:
+          requires:
+            - build-and-test-java
+      - code-quality-checks:
+          requires:
+            - build-and-test-java
+      - test-python:
+          requires:
+            - build-and-test-java
+      - coverage-report:
+          requires:
+            - test-java
