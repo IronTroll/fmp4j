@@ -1,181 +1,53 @@
 version: 2.1
 
-orbs:
-  codecov: codecov/codecov@3.3.0
-
 executors:
   java-executor:
     docker:
       - image: cimg/openjdk:17.0
     environment:
-      JVM_OPTS: -Xmx3g
       GRADLE_OPTS: "-Dorg.gradle.daemon=false"
-  python-executor:
-    docker:
-      - image: cimg/python:3.13
-    environment:
-      PYTHONUNBUFFERED: 1
 
 jobs:
-  # Build and test Java code
-  build-and-test-java:
+  build-test-spotless:
     executor: java-executor
     steps:
       - checkout
-      - restore_cache:
-          keys:
-            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
-            - gradle-cache-
-      - run:
-          name: Build project
-          command: ./gradlew clean build -x test --info
-      - save_cache:
-          paths:
-            - ~/.gradle
-          key: gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
-      - store_artifacts:
-          path: build/libs
-          destination: jars
-      - persist_to_workspace:
-          root: .
-          paths:
-            - build
-            - gradle
 
-  # Run Java tests
-  test-java:
-    executor: java-executor
-    steps:
-      - checkout
+      # Cache pre Gradle
       - restore_cache:
           keys:
-            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
-            - gradle-cache-
+            - gradle-{{ checksum "build.gradle" }}
+            - gradle-
+
       - run:
-          name: Run Java tests
+          name: Grant permissions
+          command: chmod +x ./gradlew
+
+      - run:
+          name: Run build
+          command: ./gradlew build -x test --info
+
+      - run:
+          name: Run tests
           command: ./gradlew test --info
-      - run:
-          name: Generate JaCoCo coverage report
-          command: ./gradlew jacocoTestReport
-      - store_test_results:
-          path: build/test-results
-      - store_artifacts:
-          path: build/reports/tests
-          destination: test-reports
-      - store_artifacts:
-          path: build/reports/jacoco
-          destination: coverage-reports
-      - codecov/upload:
-          files: ./build/reports/jacoco/test/jacocoTestReport.xml
-          flags: java
-      - persist_to_workspace:
-          root: .
-          paths:
-            - build/reports/jacoco
 
-  # Run code quality checks
-  code-quality-checks:
-    executor: java-executor
-    steps:
-      - checkout
-      - restore_cache:
-          keys:
-            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
-            - gradle-cache-
       - run:
           name: Run Spotless checks
           command: ./gradlew spotlessCheck --info
-      - run:
-          name: Run Checkstyle
-          command: ./gradlew checkstyleMain checkstyleTest --info
-      - store_artifacts:
-          path: build/reports/checkstyle
-          destination: checkstyle-reports
 
-  # Package and prepare for publishing
-  package:
-    executor: java-executor
-    steps:
-      - checkout
-      - restore_cache:
-          keys:
-            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
-            - gradle-cache-
-      - run:
-          name: Build fat JAR
-          command: ./gradlew fatJar --info
-      - run:
-          name: Generate Javadoc
-          command: ./gradlew javadoc --info
-      - store_artifacts:
-          path: build/libs
-          destination: packages
-      - store_artifacts:
-          path: build/docs/javadoc
-          destination: javadoc
-      - persist_to_workspace:
-          root: .
+      - save_cache:
+          key: gradle-{{ checksum "build.gradle" }}
           paths:
-            - build/libs
-            - build/docs/javadoc
+            - ~/.gradle
 
-  publish-maven-central:
-    executor: java-executor
-    steps:
-      - checkout
-      - restore_cache:
-          keys:
-            - gradle-{{ checksum "gradle.properties" }}-{{ checksum "build.gradle" }}
-            - gradle-cache-
-      - run:
-          name: Setup GPG signing key
-          command: |
-            mkdir -p ~/.gnupg
-            echo "${GPG_KEY}" | base64 -d > ~/.gnupg/private.key
-            gpg --import ~/.gnupg/private.key
-      - run:
-          name: Publish to Maven Central
-          command: |
-            ./gradlew publishAllPublicationsToMavenCentralRepository \
-              -P"org.gradle.project.signing.keyId=${GPG_KEY_ID}" \
-              -P"org.gradle.project.signing.password=${GPG_KEY_PASSWORD}" \
-              -P"org.gradle.project.signing.secretKeyRingFile=${HOME}/.gnupg/private.key" \
-              --info
-      - run:
-          name: Cleanup GPG key
-          command: rm -f ~/.gnupg/private.key
+      - store_test_results:
+          path: build/test-results
 
-  # Generate and upload coverage report
-  coverage-report:
-    executor: java-executor
-    steps:
-      - checkout
-      - attach_workspace:
-          at: .
-      - run:
-          name: Download and upload coverage to Codecov
-          command: |
-            if [ -f "build/reports/jacoco/test/jacocoTestReport.xml" ]; then
-              bash <(curl -s https://codecov.io/bash) \
-                -f build/reports/jacoco/test/jacocoTestReport.xml \
-                -t ${CODECOV_TOKEN} \
-                -F java
-            fi
+      - store_artifacts:
+          path: build/reports/tests
+          destination: test-reports
 
 workflows:
-  # Development workflow - runs on all commits
   ci:
     jobs:
-      - build-and-test-java
-      - test-java:
-          requires:
-            - build-and-test-java
-      - code-quality-checks:
-          requires:
-            - build-and-test-java
-      - test-python:
-          requires:
-            - build-and-test-java
-      - coverage-report:
-          requires:
-            - test-java
+      - build-test-spotless
