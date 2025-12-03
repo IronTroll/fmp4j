@@ -119,7 +119,6 @@ jobs:
             - build/libs
             - build/docs/javadoc
 
-  # Publish to Maven Central (only on tags)
   publish-maven-central:
     executor: java-executor
     steps:
